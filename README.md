@@ -17,7 +17,7 @@ Workflow de **n8n** para crear **alertas meteorológicas** con APIs públicas:
 - `Weather Alerts (Open-Meteo + Nominatim + Telegram/Gmail + optional Sheets).json`  
   (workflow principal importable en n8n)
 
-> Si tu archivo tiene otro nombre, reemplazá el nombre arriba por el nombre real del `.json`.
+> Reemplazar el nombre arriba por el nombre real del `.json`.
 
 ---
 
