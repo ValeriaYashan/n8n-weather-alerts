@@ -1,0 +1,503 @@
+{
+  "name": "Weather Alerts (Open-Meteo + Nominatim + Telegram/Gmail + optional Sheets)",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "hours",
+              "hoursInterval": 12
+            }
+          ]
+        }
+      },
+      "id": "a1b2c3d4-e001-4f00-9000-000000000001",
+      "name": "Schedule Trigger",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1,
+      "position": [
+        -900,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const timezone = $env.TIMEZONE || 'America/Argentina/Buenos_Aires';\n\n// EDITÁ ESTO si querés hardcodear ciudades acá\nconst cities = [\n  'Buenos Aires, Argentina',\n  'Córdoba, Argentina',\n  'Rosario, Argentina'\n];\n\n// Thresholds recomendados (editables)\nconst thresholds = {\n  rain_mm_med: 3,\n  rain_mm_high: 10,\n  heat_med_c: 32,\n  heat_high_c: 35,\n  frost_c: 0,\n  wind_high_kmh: 55,\n  dedupe_hours: 6,\n};\n\nreturn cities.map((city) => ({\n  json: {\n    city,\n    timezone,\n    thresholds,\n    run_id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,\n    ts_run: new Date().toISOString(),\n  },\n}));"
+      },
+      "id": "a1b2c3d4-e001-4f00-9000-000000000002",
+      "name": "Build Cities + Thresholds",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -680,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "batchSize": 1,
+        "options": {}
+      },
+      "id": "a1b2c3d4-e001-4f00-9000-000000000003",
+      "name": "Split In Batches",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [
+        -470,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "=https://nominatim.openstreetmap.org/search?q={{encodeURIComponent($json.city)}}&format=json&limit=1",
+        "options": {
+          "timeout": 20000,
+          "response": {
+            "responseFormat": "json"
+          },
+          "headerParameters": {
+            "parameters": [
+              {
+                "name": "User-Agent",
+                "value": "n8n-weather-alerts/1.0 (contact: you@example.com)"
+              }
+            ]
+          }
+        }
+      },
+      "id": "a1b2c3d4-e001-4f00-9000-000000000004",
+      "name": "Nominatim (Geocode City)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        -250,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const arr = Array.isArray($json) ? $json : ($json.body ?? $json);\nconst res = Array.isArray(arr) ? arr[0] : (Array.isArray(arr?.data) ? arr.data[0] : null);\n\n// HTTP Request node typically puts JSON response directly on $json.\n// In case the response is an array, handle it.\nconst first = Array.isArray($input.item.json) ? $input.item.json[0] : null;\nconst pick = first ?? (Array.isArray($json) ? $json[0] : null);\n\nif (!pick) {\n  return [{ json: { ...$input.first().json, status: 'error', error_message: 'No geocoding result for city' } }];\n}\n\nreturn [{\n  json: {\n    ...$input.first().json,\n    lat: Number(pick.lat),\n    lon: Number(pick.lon),\n    geocode_display_name: pick.display_name,\n    status: 'geocoded'\n  }\n}];"
+      },
+      "id": "a1b2c3d4-e001-4f00-9000-000000000005",
+      "name": "Pick Geocode Result",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -30,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{$json.status}}",
+              "operation": "notEqual",
+              "value2": "error"
+            }
+          ]
+        }
+      },
+      "id": "a1b2c3d4-e001-4f00-9000-000000000006",
+      "name": "Geocode OK?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        190,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "=https://api.open-meteo.com/v1/forecast?latitude={{$json.lat}}&longitude={{$json.lon}}&daily=temperature_2m_max,temperature_2m_min,precipitation_sum,windspeed_10m_max,weathercode&forecast_days=1&timezone={{encodeURIComponent($json.timezone)}}",
+        "options": {
+          "timeout": 20000,
+          "response": {
+            "responseFormat": "json"
+          }
+        }
+      },
+      "id": "a1b2c3d4-e001-4f00-9000-000000000007",
+      "name": "Open-Meteo (Forecast)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        420,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const input = $input.first().json;\nconst forecast = $json; // Open-Meteo JSON\n\nconst d = forecast?.daily || {};\nconst tmax = Array.isArray(d.temperature_2m_max) ? d.temperature_2m_max[0] : null;\nconst tmin = Array.isArray(d.temperature_2m_min) ? d.temperature_2m_min[0] : null;\nconst precip = Array.isArray(d.precipitation_sum) ? d.precipitation_sum[0] : null;\nconst wind = Array.isArray(d.windspeed_10m_max) ? d.windspeed_10m_max[0] : null;\nconst wcode = Array.isArray(d.weathercode) ? d.weathercode[0] : null;\n\nreturn [{\n  json: {\n    ...input,\n    tmax_c: tmax,\n    tmin_c: tmin,\n    precip_mm_24h: precip,\n    wind_kmh_max: wind,\n    weathercode_max: wcode,\n    status: 'forecasted'\n  }\n}];"
+      },
+      "id": "a1b2c3d4-e001-4f00-9000-000000000008",
+      "name": "Compute Metrics (24h)",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        650,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const crypto = require('crypto');\n\nconst j = $input.first().json;\nconst th = j.thresholds;\n\nfunction isThunderstorm(code) {\n  // Open-Meteo weather codes: storms are typically in 95/96/99 range.\n  return [95, 96, 99].includes(Number(code));\n}\n\nlet alert_type = 'NONE';\nlet severity = 'NONE';\n\nconst precip = Number(j.precip_mm_24h ?? 0);\nconst tmax = Number(j.tmax_c ?? -999);\nconst tmin = Number(j.tmin_c ?? 999);\nconst wind = Number(j.wind_kmh_max ?? 0);\nconst wcode = Number(j.weathercode_max ?? -1);\n\nif (precip >= th.rain_mm_high || isThunderstorm(wcode)) {\n  alert_type = isThunderstorm(wcode) ? 'STORM' : 'RAIN';\n  severity = 'HIGH';\n} else if (precip >= th.rain_mm_med) {\n  alert_type = 'RAIN';\n  severity = 'MED';\n} else if (tmax >= th.heat_high_c) {\n  alert_type = 'HEAT_WAVE';\n  severity = 'HIGH';\n} else if (tmax >= th.heat_med_c) {\n  alert_type = 'HEAT';\n  severity = 'MED';\n} else if (tmin <= th.frost_c) {\n  alert_type = 'FROST';\n  severity = 'HIGH';\n} else if (wind >= th.wind_high_kmh) {\n  alert_type = 'WIND';\n  severity = 'HIGH';\n}\n\n// Channels (configurables: si no seteás env vars, no envía)\nconst channels = [];\nif (severity === 'MED' || severity === 'HIGH') channels.push('telegram');\nif (severity === 'HIGH') channels.push('gmail');\n\n// Dedupe key: ciudad + tipo + severidad + bucket de 6 horas (o dedupe_hours)\nconst dedupeHours = Number(th.dedupe_hours ?? 6);\nconst now = new Date();\nconst bucket = Math.floor(now.getTime() / (dedupeHours * 60 * 60 * 1000));\nconst alert_key_raw = `${j.city}|${alert_type}|${severity}|${bucket}`;\nconst alert_key = crypto.createHash('sha256').update(alert_key_raw).digest('hex');\n\n// Dedupe persistente sin DB: workflow static data\nconst data = this.getWorkflowStaticData('global');\nif (!data.sent) data.sent = {};\n\nconst lastSentIso = data.sent[alert_key]?.last_sent_at || null;\nconst lastSent = lastSentIso ? new Date(lastSentIso).getTime() : 0;\nconst ageMs = now.getTime() - lastSent;\nconst allowMs = dedupeHours * 60 * 60 * 1000;\n\nlet should_send = (severity !== 'NONE');\nlet dedupe_reason = null;\n\nif (should_send && lastSentIso && ageMs < allowMs) {\n  should_send = false;\n  dedupe_reason = `dedupe_ignored (<${dedupeHours}h)`;\n}\n\n// Si vamos a enviar, marcamos como enviado ahora (simple y efectivo)\nif (should_send) {\n  data.sent[alert_key] = {\n    last_sent_at: now.toISOString(),\n    city: j.city,\n    alert_type,\n    severity\n  };\n}\n\nconst msgLines = [];\nmsgLines.push(`??? Alerta clima: ${j.city}`);\nmsgLines.push(`Tipo: ${alert_type} | Severidad: ${severity}`);\nmsgLines.push(`Tmax: ${j.tmax_c}°C | Tmin: ${j.tmin_c}°C`);\nmsgLines.push(`Lluvia 24h: ${j.precip_mm_24h} mm | Viento max: ${j.wind_kmh_max} km/h`);\nif (isThunderstorm(wcode)) msgLines.push(`? Tormenta (weathercode: ${wcode})`);\n\nconst telegram_text = msgLines.join('\\n');\nconst email_subject = `[${severity}] Alerta ${alert_type} - ${j.city}`;\nconst email_body = msgLines.join('\\n') + `\\n\\nRun: ${j.run_id}\\nKey: ${alert_key}`;\n\nreturn [{\n  json: {\n    ...j,\n    alert_type,\n    severity,\n    channels,\n    alert_key,\n    should_send,\n    dedupe_reason,\n    telegram_text,\n    email_subject,\n    email_body,\n    status: should_send ? 'alert_ready' : (dedupe_reason ? 'dedupe_ignored' : 'no_alert')\n  }\n}];"
+      },
+      "id": "a1b2c3d4-e001-4f00-9000-000000000009",
+      "name": "Apply Rules + Dedupe + Messages",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        890,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{$json.should_send}}",
+              "operation": "isTrue"
+            }
+          ]
+        }
+      },
+      "id": "a1b2c3d4-e001-4f00-9000-000000000010",
+      "name": "Should Send?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        1110,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{$env.TELEGRAM_CHAT_ID}}",
+              "operation": "notEmpty"
+            }
+          ]
+        }
+      },
+      "id": "a1b2c3d4-e001-4f00-9000-000000000011",
+      "name": "Telegram Enabled?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        1320,
+        -140
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "sendMessage",
+        "chatId": "={{$env.TELEGRAM_CHAT_ID}}",
+        "text": "={{$json.telegram_text}}",
+        "additionalFields": {}
+      },
+      "id": "a1b2c3d4-e001-4f00-9000-000000000012",
+      "name": "Telegram: Send Alert",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1,
+      "position": [
+        1540,
+        -140
+      ],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{$env.GMAIL_TO}}",
+              "operation": "notEmpty"
+            }
+          ]
+        }
+      },
+      "id": "a1b2c3d4-e001-4f00-9000-000000000013",
+      "name": "Gmail Enabled?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        1320,
+        140
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "send",
+        "to": "={{$env.GMAIL_TO}}",
+        "subject": "={{$json.email_subject}}",
+        "message": "={{$json.email_body}}",
+        "options": {}
+      },
+      "id": "a1b2c3d4-e001-4f00-9000-000000000014",
+      "name": "Gmail: Send HIGH Alert",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2,
+      "position": [
+        1540,
+        140
+      ],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{$env.LOG_SHEET_ID}}",
+              "operation": "notEmpty"
+            }
+          ]
+        }
+      },
+      "id": "a1b2c3d4-e001-4f00-9000-000000000015",
+      "name": "Logging Enabled?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        1320,
+        320
+      ]
+    },
+    {
+      "parameters": {
+        "authentication": "oAuth2",
+        "resource": "sheetWithinDocument",
+        "operation": "append",
+        "documentId": "={{$env.LOG_SHEET_ID}}",
+        "sheetName": "={{$env.SHEET_TAB_DASHBOARD || 'dashboard'}}",
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "run_id": "={{$json.run_id}}",
+            "ts_run": "={{$json.ts_run}}",
+            "city": "={{$json.city}}",
+            "lat": "={{$json.lat}}",
+            "lon": "={{$json.lon}}",
+            "tmax_c": "={{$json.tmax_c}}",
+            "tmin_c": "={{$json.tmin_c}}",
+            "precip_mm_24h": "={{$json.precip_mm_24h}}",
+            "wind_kmh_max": "={{$json.wind_kmh_max}}",
+            "weathercode_max": "={{$json.weathercode_max}}",
+            "alert_type": "={{$json.alert_type}}",
+            "severity": "={{$json.severity}}",
+            "channels_sent": "={{($json.channels || []).join(',')}}",
+            "alert_key": "={{$json.alert_key}}",
+            "status": "={{$json.status}}",
+            "error_message": "={{$json.error_message || ''}}",
+            "dedupe_reason": "={{$json.dedupe_reason || ''}}"
+          }
+        },
+        "options": {}
+      },
+      "id": "a1b2c3d4-e001-4f00-9000-000000000016",
+      "name": "Google Sheets: Append Dashboard",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.2,
+      "position": [
+        1540,
+        320
+      ],
+      "continueOnFail": true
+    }
+  ],
+  "connections": {
+    "Schedule Trigger": {
+      "main": [
+        [
+          {
+            "node": "Build Cities + Thresholds",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Cities + Thresholds": {
+      "main": [
+        [
+          {
+            "node": "Split In Batches",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Split In Batches": {
+      "main": [
+        [
+          {
+            "node": "Nominatim (Geocode City)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Split In Batches",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Nominatim (Geocode City)": {
+      "main": [
+        [
+          {
+            "node": "Pick Geocode Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Pick Geocode Result": {
+      "main": [
+        [
+          {
+            "node": "Geocode OK?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Geocode OK?": {
+      "main": [
+        [
+          {
+            "node": "Open-Meteo (Forecast)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Apply Rules + Dedupe + Messages",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Open-Meteo (Forecast)": {
+      "main": [
+        [
+          {
+            "node": "Compute Metrics (24h)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Compute Metrics (24h)": {
+      "main": [
+        [
+          {
+            "node": "Apply Rules + Dedupe + Messages",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Apply Rules + Dedupe + Messages": {
+      "main": [
+        [
+          {
+            "node": "Should Send?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Should Send?": {
+      "main": [
+        [
+          {
+            "node": "Telegram Enabled?",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Gmail Enabled?",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Logging Enabled?",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Logging Enabled?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Telegram Enabled?": {
+      "main": [
+        [
+          {
+            "node": "Telegram: Send Alert",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    },
+    "Gmail Enabled?": {
+      "main": [
+        [
+          {
+            "node": "Gmail: Send HIGH Alert",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    },
+    "Logging Enabled?": {
+      "main": [
+        [
+          {
+            "node": "Google Sheets: Append Dashboard",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "timezone": "America/Argentina/Buenos_Aires"
+  },
+  "versionId": "00000000-0000-0000-0000-000000000000",
+  "meta": {
+    "templateCredsSetupCompleted": false
+  }
+}
